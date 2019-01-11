@@ -422,12 +422,15 @@ import java.util.Map;
                                          " avoided by using 'RSET' instead.",
                                  defaultValue = "false",
                                  possibleParameters = "true or false"),
+                @SystemParameter(name = "pool.size",
+                        description = "Mail publisher connection pool size",
+                        defaultValue = "1",
+                        possibleParameters = "An integer"),
 
                 }
 )
 public class EmailSink extends Sink {
     private static final Logger log = Logger.getLogger(EmailSink.class);
-    private EmailClientConnector emailClientConnector;
     private Option optionSubject;
     private Option optionTo;
     private Option optionCc;
@@ -439,6 +442,8 @@ public class EmailSink extends Sink {
     private OptionHolder optionHolder;
     private List<String> attachments;
     private Option attachmentOption;
+    private Map<Integer, EmailClientConnector> emailClientConnectorMap;
+    private int emailClientPoolSize = 1;
 
     /**
      * The initialization method for {@link Sink}, which will be called before other methods and validate
@@ -457,11 +462,12 @@ public class EmailSink extends Sink {
         this.configReader = configReader;
         this.optionHolder = optionHolder;
         //Server system properties starts with 'mail.smtp'.
-        configReader.getAllConfigs().forEach((k, v)-> {
+        configReader.getAllConfigs().forEach((k, v) -> {
             if (k.startsWith("mail.smtp") || k.startsWith("mail.store")) {
                 initProperties.put(k, v);
             }
         });
+        emailClientConnectorMap = new HashMap<>();
         validateAndGetRequiredParameters();
     }
 
@@ -476,8 +482,11 @@ public class EmailSink extends Sink {
     public void connect() throws ConnectionUnavailableException {
         EmailConnectorFactory emailConnectorFactory = new EmailConnectorFactoryImpl();
         try {
-            emailClientConnector = emailConnectorFactory.createEmailClientConnector();
-            emailClientConnector.init(initProperties);
+            for (int i = 0; i < emailClientPoolSize; i++) {
+                EmailClientConnector emailClientConnector = emailConnectorFactory.createEmailClientConnector();
+                emailClientConnector.init(initProperties);
+                emailClientConnectorMap.put(i, emailClientConnector);
+            }
         } catch (EmailConnectorException e) {
             if (e.getCause() instanceof MailConnectException) {
                 if (e.getCause().getCause() instanceof ConnectException) {
@@ -504,12 +513,13 @@ public class EmailSink extends Sink {
      */
     @Override
     public void publish(Object payload, DynamicOptions dynamicOptions) throws ConnectionUnavailableException {
+        String to = "";
         if (optionSubject != null) {
             String subject = optionSubject.getValue(dynamicOptions);
             emailProperties.put(EmailConstants.TRANSPORT_MAIL_HEADER_SUBJECT, subject);
         }
         if (optionTo != null) {
-            String to = optionTo.getValue(dynamicOptions);
+            to = optionTo.getValue(dynamicOptions);
             emailProperties.put(EmailConstants.TRANSPORT_MAIL_HEADER_TO, to);
         }
         if (optionCc != null) {
@@ -526,8 +536,8 @@ public class EmailSink extends Sink {
         }
 
         if ((attachmentOption != null) && (!attachmentOption.isStatic())) {
-           attachments  =
-                   Arrays.asList(attachmentOption.getValue(dynamicOptions).split(EmailConstants.COMMA_SEPERATOR));
+            attachments =
+                    Arrays.asList(attachmentOption.getValue(dynamicOptions).split(EmailConstants.COMMA_SEPERATOR));
         }
 
         EmailBaseMessage emailBaseMessage;
@@ -538,21 +548,23 @@ public class EmailSink extends Sink {
         }
         emailBaseMessage.setHeaders(emailProperties);
         try {
-            emailClientConnector.send(emailBaseMessage);
+            int hash = Math.abs(to.hashCode() % emailClientPoolSize);
+            emailClientConnectorMap.get(hash).send(emailBaseMessage);
+            //emailClientConnector.send(emailBaseMessage);
         } catch (EmailConnectorException e) {
-                //calling super class logs the exception and retry
-                if (e.getCause() instanceof MailConnectException) {
-                    if (e.getCause().getCause() instanceof ConnectException) {
-                        throw new ConnectionUnavailableException("Error is encountered while connecting the smtp" 
-                                + " server by the email ClientConnector.", e);
-                    } else {
-                        throw new RuntimeException("Error is encountered while sending the message by the email"
-                                + " ClientConnector with properties: " + emailProperties.toString() , e);
-                    }
+            //calling super class logs the exception and retry
+            if (e.getCause() instanceof MailConnectException) {
+                if (e.getCause().getCause() instanceof ConnectException) {
+                    throw new ConnectionUnavailableException("Error is encountered while connecting the smtp"
+                            + " server by the email ClientConnector.", e);
                 } else {
                     throw new RuntimeException("Error is encountered while sending the message by the email"
-                            + " ClientConnector with properties: " + emailProperties.toString() , e);
+                            + " ClientConnector with properties: " + emailProperties.toString(), e);
                 }
+            } else {
+                throw new RuntimeException("Error is encountered while sending the message by the email"
+                        + " ClientConnector with properties: " + emailProperties.toString(), e);
+            }
         }
     }
 
@@ -564,8 +576,8 @@ public class EmailSink extends Sink {
         String username = optionHolder.validateAndGetStaticValue(EmailConstants.MAIL_PUBLISHER_USERNAME,
                 configReader.readConfig(EmailConstants.MAIL_PUBLISHER_USERNAME, EmailConstants.EMPTY_STRING));
         if (username.isEmpty()) {
-           throw new SiddhiAppCreationException(EmailConstants.MAIL_PUBLISHER_USERNAME + " is a mandatory parameter. "
-                   + "It should be defined in either stream definition or deployment 'yaml' file.");
+            throw new SiddhiAppCreationException(EmailConstants.MAIL_PUBLISHER_USERNAME + " is a mandatory parameter. "
+                    + "It should be defined in either stream definition or deployment 'yaml' file.");
         }
         initProperties.put(EmailConstants.TRANSPORT_MAIL_PUBLISHER_USERNAME, username);
 
@@ -598,7 +610,17 @@ public class EmailSink extends Sink {
                     "should be either 'true' or 'false'.");
         }
         initProperties.put(EmailConstants.TRANSPORT_MAIL_PUBLISHER_SSL_ENABLE, sslEnable);
-
+        String connectionPoolSize = optionHolder.validateAndGetStaticValue(EmailConstants.MAIL_PUBLISHER_POOL_SIZE,
+                configReader.readConfig(EmailConstants.MAIL_PUBLISHER_POOL_SIZE,
+                        "1"));
+        //validate connection.pool is a integer
+        try {
+            emailClientPoolSize = Integer.parseInt(connectionPoolSize);
+        } catch (NumberFormatException e) {
+            throw new SiddhiAppCreationException("Value of the " + EmailConstants.MAIL_PUBLISHER_POOL_SIZE +
+                    "should be an integer.");
+        }
+        initProperties.put(EmailConstants.MAIL_PUBLISHER_POOL_SIZE, connectionPoolSize);
         String auth = optionHolder.validateAndGetStaticValue(EmailConstants.MAIL_PUBLISHER_AUTH,
                 configReader.readConfig(EmailConstants.MAIL_PUBLISHER_AUTH,
                         EmailConstants.MAIL_PUBLISHER_DEFAULT_AUTH));
