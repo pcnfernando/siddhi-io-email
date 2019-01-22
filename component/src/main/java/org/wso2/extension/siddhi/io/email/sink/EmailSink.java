@@ -49,6 +49,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * This the class implementing email sink.
@@ -443,7 +444,9 @@ public class EmailSink extends Sink {
     private List<String> attachments;
     private Option attachmentOption;
     private Map<Integer, EmailClientConnector> emailClientConnectorMap;
-    private int emailClientPoolSize = 1;
+    private int emailClientPoolSize = 20;
+    private static AtomicInteger emailTotalCount = new AtomicInteger();
+    private static AtomicInteger emailErrorCount = new AtomicInteger();
 
     /**
      * The initialization method for {@link Sink}, which will be called before other methods and validate
@@ -549,10 +552,15 @@ public class EmailSink extends Sink {
         emailBaseMessage.setHeaders(emailProperties);
         try {
             int hash = Math.abs(to.hashCode() % emailClientPoolSize);
+            emailTotalCount.incrementAndGet();
+            log.info("Hash  :   " + hash + "    totalCount:     " + emailTotalCount.get() + "     errorCount: "
+                    + emailErrorCount.get());
             emailClientConnectorMap.get(hash).send(emailBaseMessage);
             //emailClientConnector.send(emailBaseMessage);
         } catch (EmailConnectorException e) {
             //calling super class logs the exception and retry
+            emailErrorCount.incrementAndGet();
+            log.info("errorCount: " + emailErrorCount.get());
             if (e.getCause() instanceof MailConnectException) {
                 if (e.getCause().getCause() instanceof ConnectException) {
                     throw new ConnectionUnavailableException("Error is encountered while connecting the smtp"
